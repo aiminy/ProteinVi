@@ -1,0 +1,1577 @@
+#ifndef __DEF
+#define __DEF
+
+#include "info.h"
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <map>
+#include <vector>
+#include "MyWindow.h"
+#define PDB_LINE_LENGTH 80
+
+
+using namespace std;
+typedef struct {
+  float x;
+  float y;
+  float z;
+  float temp;
+  char name[8];
+  int serial;
+} pdb_atom;
+
+/**
+ * file reader
+ */
+class PDB_File{
+   
+ protected:
+  FILE* _file;
+  char _buffer[PDB_LINE_LENGTH + 1];
+  int _lineNum;
+  
+ public:
+  PDB_File(){
+    _file = NULL;
+  }
+
+  PDB_File(const char* fileName){
+    open(fileName);
+  }
+  
+  void open(const char* fileName){
+     _file = fopen(fileName, "r");
+     _lineNum = 0;
+  }
+
+  void close(){
+    if (_file) fclose(_file);
+    _lineNum = 0;
+    _file = NULL;
+  }
+  
+  bool isOpen() const{
+    return (_file != NULL);
+  }
+  
+  const char* getLine() const{
+    return _buffer;
+  }
+  
+  const int getLineNumb() const{
+    return _lineNum;
+  }
+  
+  int next(){
+    if (!isOpen()) return 0;
+    memset(_buffer, 0, PDB_LINE_LENGTH + 1);
+    int len = fread(_buffer, 1, PDB_LINE_LENGTH, _file);
+    char nl;
+    //skip new line char
+    fread(&nl, 1, 1, _file);
+    if (nl == '\r') fread(&nl, 1, 1, _file); //for windows "\r\n"
+    _lineNum ++;
+    if (len < PDB_LINE_LENGTH) close();
+    return len;
+  }
+};
+
+/**
+ * get the type according to name 
+ * returns -1 if unknown aa name 
+ */
+inline int getAAType(const char* a){
+  for (int i = 0; i < 20; i++){
+    if (!strncmp(a, aa_names[i], 3))
+      return i;
+  }
+  return -1;
+}
+
+class AminoAcid{
+ public:
+  AminoAcid(){
+    _type = UNKOWN;
+    _standard_atoms = NULL;
+  }
+
+  /**
+   * default draw function
+   */
+  void draw(int mode);
+
+  /**
+   * set color info
+   */
+  void setColor(int mode, pdb_atom* atom=NULL);
+  
+  /**
+   * construct an aa according to aa name
+   */
+  AminoAcid(const char* name){
+    int type = getAAType(name);
+    if (type != -1) {
+      _type = type;
+      _standard_atoms = (pdb_atom**)
+	calloc(aa_numb_atoms[type], sizeof(pdb_atom*)); 
+    } else {
+      _type = UNKOWN;
+      _standard_atoms = NULL;
+    }
+ }
+
+  AminoAcid(const int type){
+    _type = type;
+    _standard_atoms = (pdb_atom**)
+      calloc(aa_numb_atoms[type], sizeof(pdb_atom*)); 
+  }
+    
+  ~AminoAcid(){
+    if (_standard_atoms) free(_standard_atoms);
+  }
+  
+  AminoAcid& operator=(const AminoAcid& aa){
+    memcpy(this, &aa, sizeof(AminoAcid));  
+    return *this;
+  }
+
+  /**
+   * returns the stanard number of atoms in this aa
+   */
+  inline int getNumbAtoms(){
+    return aa_numb_atoms[_type];
+  }
+  
+  /**
+   * add atoms to the aa
+   */
+  void add(pdb_atom* atom){
+    if (!atom) return;
+    for (int i = 0; i < getNumbAtoms(); i++){
+      if (!strcmp(aa_atoms[_type][i], atom->name)){
+	_standard_atoms[i] = atom;
+	return;
+      }
+    }
+  }
+
+  pdb_atom* get(int i){
+    return _standard_atoms[i];
+  }
+
+  int getType(){ return _type;}
+  pdb_atom** getAtoms(){ return _standard_atoms; }
+  pdb_atom* getAtom(int i){ return _standard_atoms[i];}
+  void print(){
+    printf("%s\n", aa_names[_type]);
+    for (int i = 0; i < getNumbAtoms(); i++){
+      if (!_standard_atoms[i]){
+	printf("\t%s: >>>> missing <<<<\n", aa_atoms[_type][i]);
+	
+      } else 
+	printf("\t%s: %f\t%f\t%f\n", 
+	       _standard_atoms[i]->name,
+	       _standard_atoms[i]->x,
+	       _standard_atoms[i]->y,
+	       _standard_atoms[i]->z);
+    }
+    
+  }
+    
+  void calculateCentroid(){
+    _centroid[0] = _centroid[1] = _centroid[2] = 0;
+    for (int i = 0; i < aa_numb_atoms[_type]; i++){
+      pdb_atom* atom = get(i);
+      if (!atom) continue;
+      _centroid[0] = atom->x;
+      _centroid[1] = atom->y;
+      _centroid[2] = atom->z;
+    }  
+  }
+ protected:
+  int _type;
+  pdb_atom** _standard_atoms;
+  GLfloat _centroid[3]; //side chaint centroid
+};
+
+/*
+ * contiguous aa's
+*/
+class Chaint{
+ public:
+  Chaint(){
+    _centroid[0] = _centroid[1] = _centroid[2] = 0;
+    _color[0] = 1.0 * rand() / RAND_MAX;
+    _color[1] = 1.0 * rand() / RAND_MAX;
+    _color[2] = 1.0 * rand() / RAND_MAX;
+  }
+
+  void setColor(double r, double g, double b){
+    _color[0] = (GLfloat)r;
+    _color[1] = (GLfloat)g;
+    _color[2] = (GLfloat)b;
+  }
+  void add(int pos, AminoAcid* aa){
+    _aa[pos] = *aa;
+  }
+
+  void setName(char name){
+    _name = name;
+  }
+
+  AminoAcid& get(int i){
+    return _aa[i];
+  }
+
+  int size(){
+    return _aa.size();
+  }
+  void print(){
+    printf(">>>>>>>> %c <<<<<<<<<\n", _name);
+    for (unsigned int i = 0; i < _aa.size(); i++){
+      _aa[i].print();
+    }
+  }
+
+  GLfloat* getCentroid();
+  void draw(int mode);
+ protected:
+  char _name;
+  std::map<int, AminoAcid> _aa;
+  GLfloat _centroid[3];
+  GLfloat _color[3];
+};
+#endif
+#ifndef __INFO
+#define __INFO
+
+enum AMINO_ACID {ALA = 0, ARG, ASN, ASP, CYS, GLN, GLU, GLY, HIS, ILE,
+		 LEU, LYS, MET, PHE, PRO, SER, THR, TRP, TYR, VAL, UNKOWN};
+
+//0 uncharged, 1 positively charge, 2 negatively charged
+static char aa_charge[21]={
+  0, 1, 0, 2, 0, 0, 2, 0, 1, 0,
+  0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0
+};
+
+static float aa_charge_color[3][3]={
+  {.5, .5, .5},
+  {1, 0, 0},
+  {0, 0, 1}
+};
+
+//0 nonpolar, 1 polar, 2 ionized
+static char aa_polar[21]={
+  0, 2, 1, 2, 0, 1, 2, 1, 2, 0,
+  0, 2, 0, 0, 0, 1, 1, 0, 1, 0, 0
+};
+
+static float aa_polar_color[3][3]={
+  {1, 1, 1},
+  {1, 1, 0},
+  {0, 1, 1}
+};
+
+/* aa name*/
+static char* aa_names[20] = {"ALA","ARG","ASN","ASP","CYS","GLN","GLU","GLY","HIS","ILE",
+
+			     "LEU","LYS","MET","PHE","PRO","SER","THR","TRP","TYR","VAL"};
+
+/* number of atoms in aa*/
+static char aa_numb_atoms[20] ={5, 11, 8, 8, 6, 9, 9, 4, 10, 8,
+				8, 9, 8, 11, 7, 6, 7, 14,12, 7};	 
+
+/* atom names in aa */
+static char* aa_atoms[20][15]={{"N", "C", "CA", "O", "CB", 0},                                    //ala 1
+			       {"N", "C", "CA", "O", "CB", "CG", "CD", "NE", "CZ", "NH1", "NH2", 0},//arg 2
+			       {"N", "C", "CA", "O", "CB", "CG", "OD1", "ND2", 0},                   //asn 3
+			       {"N", "C", "CA", "O", "CB", "CG", "OD1", "OD2", 0},                //asp 4
+			       {"N", "C", "CA", "O", "CB", "SG", 0},                              //cyc 5
+			       {"N", "C", "CA", "O", "CB", "CG", "CD", "OE1", "NE2", 0},          //gln 6
+			       {"N", "C", "CA", "O", "CB", "CG", "CD", "OE1", "OE2", 0},          //glu 7
+			       {"N", "C", "CA", "O", 0},                                          //gly 8
+			       {"N", "C", "CA", "O", "CB", "CG", "ND1", "CD2", "CE1", "NE2", 0},  //his 9
+			       {"N", "C", "CA", "O", "CB", "CG2", "CG1", "CD1", 0},               //ile 10
+			       {"N", "C", "CA", "O", "CB", "CG", "CD1", "CD2", 0},                //leu 11
+			       {"N", "C", "CA", "O", "CB", "CG", "CD", "CE", "NZ", 0},            //lys 12
+			       {"N", "C", "CA", "O", "CB", "CG", "SD", "CE", 0},                  //met 13
+			       {"N", "C", "CA", "O", "CB", "CG", "CD1", "CD2", "CE1", "CE2", "CZ", 0}, //phe 14
+			       {"N", "C", "CA", "O", "CB", "CG", "CD", 0},                        //pro 15
+			       {"N", "C", "CA", "O", "CB", "OG", 0},                              //ser 16
+			       {"N", "C", "CA", "O", "CB", "OG1", "CG2", 0},                      //thr 17
+			       {"N", "C", "CA", "O", "CB", "CG", "CD1", "CD2", "NE1", "CE2", 
+				"CE3", "CZ2", "CZ3", "CH2", 0},                                   //trp 18
+			       {"N", "C", "CA", "O", "CB", "CG", "CD1", "CD2", "CE1", "CE2",
+				"CZ", "OH", 0},                                                   //tyr 19
+			       {"N", "C", "CA", "O", "CB", "CG1", "CG2", 0}                       //val 20
+};
+
+static char aa_bonds[20][20][3]={{{0,2,1}, {2,1,1}, {1,3,2}, {2,4,1}, {-1, -1, -1}},                                                              //ala
+				 {{0,2,1}, {2,1,1}, {1,3,2}, {2,4,1}, {4,5,1}, {5,6,1}, {6,7,1}, {7,8,1}, {8,9,1}, {8,10,1}, {-1, -1, -1}},             //arg
+				 {{0,2,1}, {2,1,1}, {1,3,2}, {2,4,1}, {4,5,1}, {5,6,2}, {5,7,1}, {-1, -1, -1}},                                      //asn
+				 {{0,2,1}, {2,1,1}, {1,3,2}, {2,4,1}, {4,5,1}, {5,6,2}, {5,7,1}, {-1, -1, -1}},                                      //asp
+				 {{0,2,1}, {2,1,1}, {1,3,2}, {2,4,1}, {4,5,1}, {-1, -1, -1}},                                                      //cys
+				 {{0,2,1}, {2,1,1}, {1,3,2}, {2,4,1}, {4,5,1}, {5,6,1}, {6,7,2}, {6,8,1}, {-1, -1, -1}},                              //gln
+				 {{0,2,1}, {2,1,1}, {1,3,2}, {2,4,1}, {4,5,1}, {5,6,1}, {6,7,2}, {6,8,1}, {-1, -1, -1}},                              //glu
+				 {{0,2,1}, {2,1,1}, {1,3,2}, {-1, -1, -1}},                                                                      //gly
+				 {{0,2,1}, {2,1,1}, {1,3,2}, {2,4,1}, {4,5,1}, {5,6,1}, {5,7,2}, {6,8,1}, {7,9,1}, {8,9,1}, {-1, -1, -1}},              //his
+				 {{0,2,1}, {2,1,1}, {1,3,2}, {2,4,1}, {4,6,1}, {4,5,1}, {6,7,1}, {-1, -1, -1}},                                      //ile
+				 {{0,2,1}, {2,1,1}, {1,3,2}, {2,4,1}, {4,5,1}, {5,6,1}, {5,7,1}, {-1, -1, -1}},                                      //leu
+				 {{0,2,1}, {2,1,1}, {1,3,2}, {2,4,1}, {4,5,1}, {5,6,1}, {6,7,1}, {7,8,1}, {-1, -1, -1}},                              //lys
+				 {{0,2,1}, {2,1,1}, {1,3,2}, {2,4,1}, {4,5,1}, {5,6,1}, {6,7,1}, {-1, -1, -1}},                                      //met
+				 {{0,2,1}, {2,1,1}, {1,3,2}, {2,4,1}, {4,5,1}, {5,6,2}, {5,7,1}, {6,8,1}, {7,9,2}, {8,10,1}, {9,10,2}, {-1, -1, -1}},   //phe
+				 {{0,2,1}, {2,1,1}, {1,3,2}, {2,4,1}, {4,5,1}, {5,6,1}, {6,0,1}, {-1, -1, -1}},                                      //pro
+				 {{0,2,1}, {2,1,1}, {1,3,2}, {2,4,1}, {4,5,1}, {-1, -1, -1}},                                                      //ser
+				 {{0,2,1}, {2,1,1}, {1,3,2}, {2,4,1}, {4,5,1}, {4,6,1}, {-1, -1, -1}},                                              //thr
+				 {{0,2,1}, {2,1,1}, {1,3,2}, {2,4,1}, {4,5,1}, {5,6,2}, {5,6,1}, {6,8,1}, {7,9,2}, {7,10,1},              //trp
+				  {8,9,1}, {9,11,2}, {10,12,2}, {11,13,2}, {12,13,1}, {-1, -1, -1}},
+				 {{0,2,1}, {2,1,1}, {1,3,2}, {2,4,1}, {4,5,1}, {5,6,1}, {5,7,2}, {6,8,2}, {7,9,1}, {8,10,1}, {9,10,2}, {10,11,1}, {-1, -1, -1}},  //tyr
+				 {{0,2,1}, {2,1,1}, {1,3,2}, {2,4,1}, {4,5,1}, {4,6,1}, {-1, -1, -1}}                                               //val
+};
+
+static char *atom_names[]={  
+  "H",         // Hydrogen
+  "He",        // Helium
+  "Li",        // Lithium
+  "Be",        // Beryllium
+  "B",         // Boron
+  "C",         // Carbon
+  "N",         // Nitrogen
+  "O",         // Oxygen
+  "F",         // Fluorine
+  "Ne",        // Neon
+  "Na",        // Sodium
+  "Mg",        // Manganese
+  "Al",        // Aluminum
+  "Si",        // Silicon
+  "P",         // Phosphorus
+  "S",         // Sulfur
+  "Cl",        // Chlorine
+  "Ar",        // Argon
+  "K",         // Potassium
+  "Ca",        // Calcium
+  "Sc",        // Scandium
+  "Ti",        // Titanium
+  "V",         // Vanadium
+  "Cr",        // Chromium
+  "Mn",        // Manganese
+  "Fe",        // Iron
+  "Co",        // Cobalt
+  "Ni",        // Nickle
+  "Cu",        // Copper
+  "Zn",        // Zinc
+  "Ga",        // Gallium
+  "Ge",        // Germanium
+  "As",        // Arsenic
+  "Se",        // Selenium
+  "Br",        // Boron
+  "Kr"         //Krypton
+};
+
+static float atom_sizes[] = { // sizes increase as the electron shells increase
+	0.37,		// Hydrogen
+	0.50,		// Helium
+	1.52,		// Lithium
+	1.11,		// Beryllium
+	0.88,		// Boron
+	0.77,		// Carbon
+	0.70,		// Nitrogen
+	0.66,		// Oxygen
+	0.64,		// Fluorine
+	0.70,		// Neon
+	1.5, // Sodium *
+	1.5, // Manganese *
+	1.5, // Aluminum *
+	1.17,		// Silicon
+	1.10,		// Phosphorus
+	1.5, // Sulfur
+	0.99,		// Chlorine
+	1.5, // Argon *
+	2.0, // Potassium *
+	2.0, // Calcium *
+	2.0, // Scandium *
+	2.0, // Titanium *
+	2.0, // Vanadium *
+	2.0, // Chromium *
+	2.0, // Manganese *
+	2.0, // Iron *
+	2.0, // Cobalt *
+	2.0, // Nickle *
+	2.0, // Copper *
+	2.0, // Zinc *
+	2.0, // Gallium *
+	2.0, // Germanium *
+	2.0, // Arsenic *
+	2.0, // Selenium *
+	2.0, // Boron *
+	2.0  // Krypton *
+};
+
+
+#endif
+
+#ifndef __MAIN_WINDOW
+#define __MAIN_WINDOW
+#include "FL/Fl_Window.H"
+#include "MyWindow.h"
+#include "FL/Fl_Button.H"
+#include "FL/Fl_File_Chooser.H"
+#include "FL/Fl_Color_Chooser.H"
+#include "FL/Fl_Menu_Bar.H"
+#include "FL/Fl_Toggle_Button.H"
+#include "FL/Fl_Choice.H"
+#include "pdb_parser.h"
+
+#include <FL/Fl_Tiled_Image.H>
+
+
+
+PDB_Parser *pdb;
+MyWindow *glWin;
+void cb_open(Fl_Widget* w, void* data){
+  if (!pdb) free(pdb);
+  Fl_File_Chooser fc(".", "*.pdb", Fl_File_Chooser::SINGLE, "Open PDB File");
+  fc.show();
+  while (fc.visible())
+    Fl::wait();
+  pdb = new PDB_Parser(fc.value());
+  pdb->parse();
+  glWin->setData(DATA_TYPE_PDB, pdb);
+  glWin->draw();
+}
+
+void cb_save(Fl_Widget* w, void* data){
+  if (!glWin) return;
+  Fl_File_Chooser fc(".", "PNG Files (*.png)\tJPEG Files (*.{jpeg, jpg})", Fl_File_Chooser::CREATE, "Save Screenshot");
+  fc.show();
+  while (fc.visible())
+    Fl::wait();
+  if (fc.value())
+    glWin->save((char*)fc.value());
+  
+}
+
+void cb_menu(Fl_Widget* w, void* data){
+  Fl_Menu_* mw = (Fl_Menu_*)w;
+  const Fl_Menu_Item* m = mw->mvalue();
+  unsigned int flag = (unsigned int)m->user_data_;
+  
+  if (!strcmp("&Chaints", m->label())) flag = COLOR_MODE_CHAINT;
+  if (!strcmp("&AA Polarity", m->label())) flag = COLOR_MODE_AA_POLAR;
+  if (!strcmp("&AA Charge", m->label())) flag = COLOR_MODE_AA_CHARGE;
+  if (!strcmp("&Atom Temp", m->label())) flag = COLOR_MODE_ATOM_TEMP;
+  if (!strcmp("&Atom Type", m->label())) flag = COLOR_MODE_ATOM_TYPE;
+  //printf("%s %d\n", m->label(), flag);
+  if (pdb)
+    pdb->toggleMode(flag);
+  glWin->rebuild();
+}
+
+Fl_Menu_Item menu_file[] ={
+  {"&Open PDB", FL_CTRL+'o', cb_open, 0, FL_MENU_DIVIDER},
+  {"&Save Image", FL_CTRL+'s', cb_save, 0, FL_MENU_DIVIDER},
+  {0}
+};
+
+Fl_Menu_Item menu_draw[] ={
+  {"&Atoms", 0, 0, (void*)DRAW_MODE_ATOMS, FL_MENU_TOGGLE},
+  {"&Bonds", 0, 0, (void*)DRAW_MODE_BONDS, FL_MENU_TOGGLE | FL_MENU_VALUE},
+  {"&Side Chaints", 0, 0, (void*)DRAW_MODE_NO_SIDE_CHAINTS, FL_MENU_TOGGLE},
+  {"&Curves", 0, 0, (void*)DRAW_MODE_CURVES, FL_MENU_TOGGLE},
+  {"&Chaint Vector", 0, 0, (void*)DRAW_MODE_CHAINT_VECTOR, FL_MENU_TOGGLE},
+  {0},
+};
+
+Fl_Menu_Item menu_color[] ={
+  {"&Chaints", 0},
+  {"&AA Polarity", 0},
+  {"&AA Charge", 0},
+  {"&Atom Temp", 0},
+  {"&Atom Type", 0},
+  {0}
+};
+
+class MainWindow : public Fl_Window{
+ public:
+  MainWindow(int x, int y, int h, int w, const char* title) : Fl_Window(x, y, h, w, title){
+    glWin = NULL;
+    pdb = NULL;
+  } 
+  
+  void setup(){
+    Fl_Menu_Button *menu_button1 = new Fl_Menu_Button(0, 522, 100, 30, "File");
+    menu_button1->menu(menu_file);
+    menu_button1->callback(cb_menu);
+
+    Fl_Menu_Button *menu_button2 = new Fl_Menu_Button(110, 522, 100, 30, "Draw");
+    menu_button2->menu(menu_draw);
+    menu_button2->callback(cb_menu);
+
+    Fl_Choice *menu_button3 = new Fl_Choice(220, 522, 100, 30);
+    menu_button3->menu(menu_color);
+    menu_button3->callback(cb_menu);
+    
+    
+    
+  }
+
+  void setGL(MyWindow* win){
+    glWin = win;
+  }
+ protected:
+  int handle(int event){
+    if (glWin){
+      int w = glWin->w();
+      int h = glWin->h();
+      if (Fl::event_x() < w && Fl::event_y() < h)
+	return glWin->handle(event); 
+      else 
+	return Fl_Window::handle(event);
+    }
+  }
+};
+
+#endif
+#include <FL/Fl.H>
+#include <FL/Fl_Gl_Window.H>
+#include <FL/gl.h>
+#include <FL/glut.H>
+#include "pdb_parser.h"
+#include "imageio.h"
+#include "FL/Fl_Color_Chooser.H"
+
+#ifdef _APPLE
+#include <OpenGL/glu.h>
+#else
+#include <GL/glu.h>
+#endif
+
+#include <stdio.h>
+#include <math.h>
+
+#include "def.h"
+
+#define DATA_TYPE_NULL         0
+#define DATA_TYPE_PDB          1
+
+#define DISPLAY_LIST_NULL      9999
+#define TEXTURE_NAME_NULL      9999
+
+#ifndef __MY_WINDOW
+#define __MY_WINDOW
+class MyWindow : public Fl_Gl_Window{
+ public:
+  void draw();
+  int handle(int);
+  void save(char*);
+  void setData(int type, void* data){
+    this->type = type;
+    this->data = data;   
+    rebuild();
+  }
+  
+  void rebuild(){
+    if (display != DISPLAY_LIST_NULL){
+      glDeleteLists(display, 1);
+      display = DISPLAY_LIST_NULL;
+    }
+    redraw();
+  }
+
+  MyWindow(int x, int y, int w, int h, const char* t):
+    Fl_Gl_Window(x, y, w, h, t){
+    theta = M_PI / 2;
+    alpha = M_PI / 2;
+    d = 50;
+    mode = 0;
+    type = 0;
+    data = 0;
+    display = DISPLAY_LIST_NULL;
+    texture_name = TEXTURE_NAME_NULL;
+  }
+ 
+ protected:
+
+  void drawData();
+  void camera();
+  void drawAxis();
+  void processPick();
+  int mode;
+  GLuint texture_name;
+  GLuint display;
+  void* data;
+  int type;
+
+  //camera variables
+  double theta, alpha, d;
+  int ox, oy;
+  
+};
+#endif
+#ifndef __PDB_PARSE
+#define __PDB_PARSE
+
+#include "def.h"
+
+#define PDB_LINE_LENGTH 80
+#define PDB_MAX_CHAINTS 30
+
+
+#define DRAW_MODE_ATOMS             1
+#define DRAW_MODE_BONDS             2
+#define DRAW_MODE_NO_SIDE_CHAINTS   4
+#define DRAW_MODE_CURVES            8
+#define DRAW_MODE_TEXT_GRID        16
+#define DRAW_MODE_CHAINT_VECTOR    32
+
+
+#define COLOR_MODE_CHAINT         256
+#define COLOR_MODE_AA_POLAR       512
+#define COLOR_MODE_AA_CHARGE     1024
+#define COLOR_MODE_ATOM_TYPE     2048
+#define COLOR_MODE_ATOM_TEMP     4096
+
+using namespace std;
+
+/**
+ * parser for pdf 2.2 http://www.rcsb.org/pdb/docs/format/pdbguide2.2/guide2.2_frame.html
+ */
+
+class PDB_Parser{
+ public:
+  PDB_Parser(const char* fileName){
+    _file = PDB_File(fileName);
+    _numbChaints = 0;
+    _mode = DRAW_MODE_BONDS | DRAW_MODE_NO_SIDE_CHAINTS;
+    
+    for (int i = 0; i < 64 * 4; i++){
+      _strip[i] = (GLubyte)(i % 256);
+    }
+  }
+
+  ~PDB_Parser(){
+    for (int i = 0; i < _numbChaints; i++){
+      delete(_chaints + i);
+    }
+  }
+  int getNumbChaints() const {
+    return _numbChaints;
+  }
+    
+  Chaint* getChaint(int i){
+    return _chaints + i;
+  }
+  int parse();
+  
+  void draw();
+    
+  void toggleMode(unsigned int m){
+    _mode &=0xff;
+    _mode = _mode ^ m;
+    if (m == COLOR_MODE_AA_POLAR && (_mode & COLOR_MODE_AA_CHARGE))
+      _mode ^= COLOR_MODE_AA_CHARGE;
+    
+    if (m == COLOR_MODE_AA_CHARGE && (_mode & COLOR_MODE_AA_POLAR))
+      _mode ^= COLOR_MODE_AA_POLAR;
+
+    if (m == COLOR_MODE_ATOM_TYPE && (_mode & COLOR_MODE_ATOM_TEMP))
+      _mode ^= COLOR_MODE_ATOM_TEMP;
+
+    if (m == COLOR_MODE_ATOM_TEMP && (_mode & COLOR_MODE_ATOM_TYPE))
+      _mode ^= COLOR_MODE_ATOM_TYPE;
+    
+    GLuint name;
+    if (m & DRAW_MODE_TEXT_GRID){
+    
+    }
+  }
+  
+ protected:
+  unsigned int _mode;
+  PDB_File _file;
+  Chaint _chaints[PDB_MAX_CHAINTS];
+  int _numbChaints;
+  GLubyte _strip[64 * 4];
+};
+#endif
+
+#ifndef __IMAGE_IO
+#define __IMAGE_IO
+
+//jpeg codec
+
+/*compress and write to an jpeg image, quality is between 0 and 100
+ */
+void compress(unsigned char* array, char* file_name, int w, int h, int ch, int quality=80);
+
+/*decompress from a file, user of this function is responsible for reclaiming the image buffer
+ */
+unsigned char* decompress(char* file_name, int &w, int &h, int& ch);
+
+//png codec
+
+#ifdef __APPLE
+  #define GAMA .60
+#else
+  #define GAMA 1.0
+#endif
+
+/*write char* buffer to file, given width, height, 0 if no alpha channel
+ */
+int write_png(char *file_name, unsigned char* buffer, int width, int height, int hasAlpha);
+
+/*open png file, return image data, also gives back width, height, number of channels and if hasAlpha==0, strip alpha channel
+ */
+unsigned char* open_png(char* filename, int &w, int &h, int &ch, int hasAlpha);
+#endif
+#include "pdb_parser.h"
+
+void PDB_Parser::draw(){
+  glPushMatrix();
+  glInitNames();
+  glPushName(0);
+  //centering
+  GLfloat centroid[3] = {0, 0 ,0};
+  for (int i = 0; i < getNumbChaints(); i++){
+    GLfloat* cur = getChaint(i)->getCentroid();
+    centroid[0] += cur[0];
+    centroid[1] += cur[1];
+    centroid[2] += cur[2];
+  }
+  centroid[0] /= getNumbChaints();
+  centroid[1] /= getNumbChaints();
+  centroid[2] /= getNumbChaints();
+  glTranslatef(-centroid[0], -centroid[1], -centroid[2]);
+  //draw chaints
+  for (int i = 0; i < getNumbChaints(); i++){
+    Chaint* chaint = getChaint(i);
+    glLoadName(i + 1);
+    chaint->draw(_mode);    
+    //glPopName();
+  }
+  //glPopName(1);
+  glPopMatrix();
+}
+
+void AminoAcid::setColor(int mode, pdb_atom* atom){
+  
+  if (mode & COLOR_MODE_ATOM_TYPE && atom){
+    switch (atom->name[0]){
+    case 'H': glColor3f(0, 1, 1); break;
+    case 'N': glColor3f(.7, 1, 1); break;
+    case 'O': glColor3f(0, 0, 1); break;
+    case 'C': glColor3f(.1, .1, .1); break;
+    case 'S': glColor3f(1, 1, 0); break;
+    }
+    return;
+  }
+
+  if (mode & COLOR_MODE_ATOM_TEMP && atom){
+    glColor3f(atom->temp / 100, .3, 1 - atom->temp/100);
+    return;
+  }
+  
+  if (mode &  COLOR_MODE_AA_POLAR) {
+    glColor3fv(aa_polar_color[aa_polar[_type]]);
+    return;
+  }
+  
+  if (mode & COLOR_MODE_AA_CHARGE) {
+    glColor3fv(aa_charge_color[aa_charge[_type]]);
+    return;
+  }
+  
+}
+
+void AminoAcid::draw(int mode){
+  if (mode & DRAW_MODE_ATOMS){
+    glEnable(GL_LIGHTING);
+    for (int i = 0; i < aa_numb_atoms[_type]; i++){
+      if (mode & DRAW_MODE_NO_SIDE_CHAINTS && i >= 3) break;
+      double radius= .3;
+      pdb_atom *atom = _standard_atoms[i];
+      switch (atom->name[0]){
+      case 'H': radius = .37; break;
+      case 'N': radius = .70; break;
+      case 'O': radius = .66; break;
+      case 'C': radius = .77; break;
+      case 'S': radius = 1.5; break;
+      }
+      setColor(mode, atom);
+      glPushMatrix();
+      glTranslatef(atom->x, atom->y, atom->z);
+      if (mode & DRAW_MODE_BONDS) 
+	glScalef(.6, .6, .6);
+      glutSolidSphere(radius, 10, 6);
+      //glutSolidTeapot(radius);
+      glPopMatrix();
+    }
+  }
+  if (mode & DRAW_MODE_CHAINT_VECTOR){
+    glDisable(GL_LIGHTING);
+    calculateCentroid();
+    setColor(mode, _standard_atoms[1]);
+    glBegin(GL_LINES);
+    glVertex3fv(_centroid);
+    glColor3f(1, 0, 0);
+    glVertex3fv((GLfloat*)_standard_atoms[1]);
+    glEnd();
+  }
+  if (mode & DRAW_MODE_BONDS){
+    glDisable(GL_LIGHTING);
+    int index = 0;
+    while(index <= 20){
+      char* bounds = aa_bonds[_type][index];
+      if (bounds[0] < 0) break;
+      if (!_standard_atoms[bounds[0]] || !_standard_atoms[bounds[1]]) {
+	index ++;
+	continue;
+      } 
+      if (mode & DRAW_MODE_NO_SIDE_CHAINTS && index >= 2) break;
+      if (bounds[2] <= 1){
+	glLineWidth(2);
+      }
+      else{
+	glLineWidth(3);
+      }
+      
+      glBegin(GL_LINES);
+      glVertex3fv((GLfloat*)_standard_atoms[bounds[0]]);
+      glVertex3fv((GLfloat*)_standard_atoms[bounds[1]]);
+      glEnd();
+      index++;
+    }
+  }
+}
+
+void Chaint:: draw(int mode){
+  glPushMatrix();  
+  for (unsigned int i = 0; i < _aa.size(); i++){
+    glColor3fv(_color);
+    _aa[i].draw(mode);
+    if (mode & DRAW_MODE_BONDS && i < _aa.size() - 1){
+      AminoAcid& cur = _aa[i];
+      AminoAcid& next = _aa[i + 1];
+      glLineWidth(2);
+      glBegin(GL_LINES);
+      glVertex3fv((GLfloat*)(cur.getAtoms()[1]));
+      glVertex3fv((GLfloat*)(next.getAtoms()[0]));
+      glEnd();
+    } 
+  }
+  if (mode & DRAW_MODE_CURVES){
+
+#if 1
+    glDisable(GL_LIGHTING);
+    glLineWidth(2);
+    glColor3fv(_color);
+    GLfloat ctrlPoints[_aa.size() * 3][3];
+    for (unsigned int i = 0; i < _aa.size(); i++){
+      pdb_atom* atom1 = _aa[i].get(0);
+      pdb_atom* atom2 = _aa[i].get(2);
+      pdb_atom* atom3 = _aa[i].get(1);
+      memcpy(ctrlPoints[i * 3 + 0], atom1, sizeof(GLfloat) * 3);
+      memcpy(ctrlPoints[i * 3 + 1], atom2, sizeof(GLfloat) * 3);
+      memcpy(ctrlPoints[i * 3 + 2], atom3, sizeof(GLfloat) * 3);
+    }
+    glMap1f(GL_MAP1_VERTEX_3, 0, 10, 3, _aa.size() * 3, &ctrlPoints[0][0]);
+    glEnable(GL_MAP1_VERTEX_3);
+    //glColor3f(.5, .5, 0);
+    glBegin(GL_LINE_STRIP);
+    for (float i = 0; i < 10; i += .1f){
+      glEvalCoord1f(i);
+    }
+    glEnd();    
+#endif
+    glEnable(GL_LIGHTING);
+  }
+  glPopMatrix();
+}
+
+GLfloat* Chaint::getCentroid(){
+  if (_centroid[0] == 0 &&
+      _centroid[1] == 0 &&
+      _centroid[2] == 0){
+   
+    int count = 0;
+    for (unsigned int i = 0; i < _aa.size(); i++){
+      AminoAcid& aa = _aa[i];
+      pdb_atom** atoms = aa.getAtoms();
+      for (int j = 0; j < aa.getNumbAtoms(); j++){
+	if (atoms[j]){
+	  count++;
+	  _centroid[0] += atoms[j]->x;
+	  _centroid[1] += atoms[j]->y;
+	  _centroid[2] += atoms[j]->z;
+	}
+      }
+    }
+    
+    _centroid[0] /= count;
+    _centroid[1] /= count;
+    _centroid[2] /= count;
+  }
+  return _centroid;
+}
+#include "MyWindow.h"
+#include "def.h"
+#include "pdb_parser.h"
+#include "FL/Fl_Window.H"
+#include "MainWindow.h"
+
+#include "FL/Fl_Tiled_Image.H"
+#include "FL/Fl_PNG_Image.H"
+int main(int argc, char** args){
+   
+  MainWindow *main = new MainWindow(10, 10, 512, 600, "Protein Vis");
+  Fl_Group group(0, 0, 512, 600);
+  group.image(
+	      new Fl_Tiled_Image(
+				 new Fl_PNG_Image("test.png")));
+  group.align(FL_ALIGN_INSIDE);
+  MyWindow* win = new MyWindow(0, 0, 512, 512, "OpenGL");
+ 
+  main->setGL(win);
+  main->setup();
+  group.end();
+  group.resizable(win);
+  main->resizable(group);
+  main->show();
+  win->show();
+  return Fl::run();
+}
+#include "MyWindow.h"
+
+void MyWindow::drawAxis(){
+  glLineWidth(1);
+  glPushMatrix();
+  glDisable(GL_LIGHTING);
+  glColor3f(1, 0, 0);
+  glBegin(GL_LINES);
+  glVertex3f(0, 0, 0);
+  glVertex3f(1, 0, 0);
+  glEnd();
+  
+  glColor3f(0, 1, 0);
+  glBegin(GL_LINES);
+  glVertex3f(0, 0, 0);
+  glVertex3f(0, 1, 0);
+  glEnd();
+  
+  glColor3f(0, 0, 1);
+  glBegin(GL_LINES);
+  glVertex3f(0, 0, 0);
+  glVertex3f(0, 0, 1);
+  glEnd();
+  
+  glEnable(GL_LIGHTING);
+  glPopMatrix();
+}
+
+#define BUFFER_SIZE 64
+void MyWindow::processPick(){
+  static GLuint selectBuff[BUFFER_SIZE];
+  GLint hits, viewport[4];
+  glSelectBuffer(BUFFER_SIZE, selectBuff);
+  glGetIntegerv(GL_VIEWPORT, viewport);
+  glMatrixMode(GL_PROJECTION);
+  glPushMatrix();
+  glRenderMode(GL_SELECT);
+  glLoadIdentity();
+  gluPickMatrix(Fl::event_x(), viewport[3] - Fl::event_y(), 1, 1, viewport);
+  GLfloat aspect = 1.0 * viewport[2] / viewport[3];
+  gluPerspective(45, aspect, .5, 425);
+  camera();
+  drawData();
+  
+  hits = glRenderMode(GL_RENDER);
+  if (hits == 1 ){
+    static double r=.4;
+    static double g=1;
+    static double b=.3;
+    
+    if (fl_color_chooser("Set Chaint Color", r,g,b)){
+      PDB_Parser* pdb = (PDB_Parser*)data; 
+      pdb->getChaint(selectBuff[3] - 1)->setColor(r, g, b);
+      rebuild();
+    }
+  }
+  glMatrixMode(GL_PROJECTION);
+  glPopMatrix();
+  glMatrixMode(GL_MODELVIEW);
+}
+
+void MyWindow::draw(){
+  if (!valid()) {
+    valid(1);
+    glLoadIdentity();
+    glViewport(0, 0, w(), h());    
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_AUTO_NORMAL);
+    glEnable(GL_NORMALIZE);
+    glShadeModel(GL_SMOOTH);
+    static GLfloat white[] = {.5, .5, .5, 1 };
+    static GLfloat gray[] = { .2, .2, .2, 1 };
+    static GLfloat shininess[] = { 60 };
+    static GLfloat position[] = { 50, -50, 5, 0};
+    static GLfloat position2[] = { -50, -50, 0, 0};
+    
+    glLightfv(GL_LIGHT0, GL_POSITION, position);
+    glLightfv(GL_LIGHT0, GL_POSITION, position2);
+
+    glEnable(GL_LIGHTING);
+    glEnable(GL_LIGHT0);
+    glEnable(GL_LIGHT1);
+    glLightfv(GL_LIGHT0, GL_DIFFUSE, white);
+    glLightfv(GL_LIGHT0, GL_AMBIENT, gray);
+    glLightfv(GL_LIGHT0, GL_SPECULAR, white);
+    glLightfv(GL_LIGHT0, GL_SHININESS, shininess);
+
+    glLightfv(GL_LIGHT1, GL_DIFFUSE, white);
+    glLightfv(GL_LIGHT1, GL_SPECULAR, white);
+    glLightfv(GL_LIGHT1, GL_SHININESS, shininess);
+    
+    glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, white);
+    glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, white);
+    
+    glColorMaterial(GL_FRONT_AND_BACK, GL_DIFFUSE);
+    glEnable(GL_COLOR_MATERIAL);
+    glLightModeli(GL_LIGHT_MODEL_COLOR_CONTROL,
+		  GL_SEPARATE_SPECULAR_COLOR);
+  }
+  
+  glMatrixMode(GL_PROJECTION);
+  glLoadIdentity();
+  gluPerspective(45, (float)w()/h(), .5, 300);
+  glMatrixMode(GL_MODELVIEW);
+  
+  glPushMatrix();
+  glLoadIdentity();
+  camera();
+      
+  glClearColor(0, 0, 0, 0);
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+  
+  if (texture_name == TEXTURE_NAME_NULL){
+    glGenTextures(1, &texture_name);
+    glBindTexture(GL_TEXTURE_2D, texture_name);
+    int w, h, c;
+    unsigned char* array = open_png("texture.png", w, h, c, 1);
+    
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    
+    GLfloat coef1[] = {1, 0, 0, 0};
+    GLfloat coef2[] = {0, 1, 0, 0};
+    glTexGeni(GL_S, GL_TEXTURE_GEN_MODE, GL_OBJECT_LINEAR);
+    glTexGenfv(GL_S, GL_EYE_PLANE, coef1);
+    glTexGeni(GL_T, GL_TEXTURE_GEN_MODE, GL_OBJECT_LINEAR);
+    glTexGenfv(GL_T, GL_EYE_PLANE, coef2);
+    
+    glEnable(GL_TEXTURE_GEN_S);
+    glEnable(GL_TEXTURE_GEN_T);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, array);
+    glEnable(GL_TEXTURE_2D);
+    glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_DECAL);
+    glBindTexture(GL_TEXTURE_2D, texture_name);
+    free(array);
+  }
+  
+  if (display == DISPLAY_LIST_NULL){
+    display = glGenLists(1);
+    glNewList(display, GL_COMPILE_AND_EXECUTE);
+    drawAxis();
+    drawData();
+    glEndList();
+  } else {
+    glBindTexture(GL_TEXTURE_2D, texture_name);
+    
+    glCallList(display);
+  }
+  
+  glPopMatrix();
+}
+
+void MyWindow::save(char* fileName){
+  unsigned char* array = (unsigned char*)malloc(sizeof(int) * h() * w());
+  glPixelZoom(1, -1);
+  glReadPixels(0, 0, w(), h(), GL_RGBA, GL_UNSIGNED_INT_8_8_8_8, array);
+  
+#ifndef _APPLE
+  for (int i = 0; i < h(); i++)
+      for (int j = 0; j < w(); j++){
+	unsigned char b = array[(i * w() + j) * 4 + 0];
+	array[(i * w() + j) * 4 + 0] = array[(i * w() + j) * 4 + 3];
+	array[(i * w() + j) * 4 + 3] = b;
+	b = array[(i * w() + j) * 4 + 1];
+	array[(i * w() + j) * 4 + 1] = array[(i * w() + j) * 4 + 2];
+	array[(i * w() + j) * 4 + 2] = b;
+      }
+  
+#endif  
+  int len = strlen(fileName);
+  if (!strcmp(fileName + len - 3, "png") || !strcmp(fileName + len - 3, "PNG"))
+    write_png(fileName, array, w(), h(), 1);
+  
+  
+  if (!strcmp(fileName + len - 3, "jpg") || !strcmp(fileName + len - 3, "JPG") ||
+      !strcmp(fileName + len - 4, "jpeg") || !strcmp(fileName + len - 4, "JPEG")){
+    unsigned char* array2 = (unsigned char*)malloc(3 * h() * w());
+    for (int i = 0; i < h(); i++)
+      for (int j = 0; j < w(); j++){
+
+	array2[(i * w() + j) * 3 + 0] = array[(i * w() + j) * 4 + 0];
+	array2[(i * w() + j) * 3 + 1] = array[(i * w() + j) * 4 + 1];
+	array2[(i * w() + j) * 3 + 2] = array[(i * w() + j) * 4 + 2];
+
+      }
+    compress(array2, fileName, w(), h(), 3);
+    delete[] array2;
+  }
+  delete[] array;  
+}
+
+void MyWindow::camera(){
+  double ex = d * cos(theta) * sin(alpha);
+  double ey = d * cos(theta) * cos(alpha);
+  double ez = d * sin(theta);  
+  gluLookAt(ex, ey, ez, 0, 0, 0, 0, 0, 1);
+}
+
+int MyWindow::handle(int event){
+  PDB_Parser *pdb = NULL;
+  if (type == DATA_TYPE_PDB){
+    pdb = (PDB_Parser*)data;
+  }
+  switch(event){
+  case FL_MOUSEWHEEL:
+    d += 3 * Fl::event_dy();
+    redraw();
+    break;
+  case FL_KEYBOARD:
+    switch (Fl::event_key()){
+    case 'a': d += 5; redraw(); break;
+    case 'z': d -= 5; redraw(); break;
+    case 'q': mode = (mode + 1) % 3; redraw(); break;
+    case '1': if (pdb) pdb->toggleMode(DRAW_MODE_ATOMS); rebuild();break;
+    case '2': if (pdb) pdb->toggleMode(DRAW_MODE_BONDS); rebuild(); break;
+    case '3': if (pdb) pdb->toggleMode(DRAW_MODE_NO_SIDE_CHAINTS); rebuild(); break;
+    case '4': if (pdb) pdb->toggleMode(DRAW_MODE_CURVES); rebuild(); break;
+    case '5': if (pdb) pdb->toggleMode(DRAW_MODE_CHAINT_VECTOR); rebuild(); break;
+    case '6': if (glIsEnabled(GL_TEXTURE_2D)) glDisable(GL_TEXTURE_2D); else glEnable(GL_TEXTURE_2D);
+      rebuild(); 
+      break;
+    case '7':{
+      unsigned char* array = (unsigned char*)malloc(sizeof(int) * h() * w());
+      glPixelZoom(1, -1);
+      glReadPixels(0, 0, w(), h(), GL_RGBA, GL_UNSIGNED_INT_8_8_8_8, array);
+      unsigned char* array2 = (unsigned char*)malloc(sizeof(int) * 256 * 256);
+      gluScaleImage(GL_RGBA, w(), h(), GL_UNSIGNED_BYTE, array, 
+		    256, 256, GL_UNSIGNED_BYTE, array2); 
+      glBindTexture(GL_TEXTURE_2D, texture_name);
+      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 256, 256, 0, GL_RGBA, GL_UNSIGNED_BYTE, array2);
+      free(array);
+      free(array2);
+      break;
+    }
+    
+    case 'p': if (pdb) pdb->toggleMode(COLOR_MODE_AA_POLAR); rebuild(); break;
+    case 'o': if (pdb) pdb->toggleMode(COLOR_MODE_AA_CHARGE); rebuild(); break;
+    case 'i': if (pdb) pdb->toggleMode(COLOR_MODE_ATOM_TEMP); rebuild(); break;
+    case 'u': if (pdb) pdb->toggleMode(COLOR_MODE_ATOM_TYPE); rebuild(); break;
+    case 'm': save("protein_vis.png"); break;
+    default: break;
+    }
+    break;
+
+  case FL_PUSH:
+    ox = Fl::event_x();
+    oy = Fl::event_y();
+    if (Fl::event_button() == FL_RIGHT_MOUSE){
+      processPick();
+    }
+    break;
+
+  case FL_DRAG:
+    switch (Fl::event_button()){
+    
+    case FL_LEFT_MOUSE:{
+      alpha += .005 * (Fl::event_x() - ox);
+      theta += .005 * (Fl::event_y() - oy);
+      if (alpha < 0) alpha = 2 * M_PI;
+      if (alpha > 2 * M_PI) alpha = 0;
+      
+      if (theta < -M_PI/2) theta= -M_PI/2;
+      if (theta > M_PI/2)  theta = M_PI/2;
+      
+      ox = Fl::event_x();
+      oy = Fl::event_y();
+      redraw();
+      break;
+    }
+    
+    }
+  }
+  return 0;
+}
+
+void MyWindow::drawData(){  
+  switch (type){
+  case DATA_TYPE_PDB:{
+    
+    PDB_Parser* pdb = (PDB_Parser*)data; 
+    pdb->draw();
+    
+    break;
+  }
+    
+  }
+}
+#include "pdb_parser.h"
+#include <stdlib.h>
+
+pdb_atom* parseAtom(const char* line, char* resName, int& resSeq, char& chaintID);
+
+
+
+int PDB_Parser::parse(){
+  while (_file.next()){
+    const char* buffer = _file.getLine();
+    /*atom*/
+    if (!strncmp(buffer, "ATOM", 4)){
+      char resName[3];
+      int resSeq;
+      pdb_atom* atom = NULL;
+      AminoAcid* aa = NULL;   
+      int seq = 0;
+      char chaintID;
+      while (strncmp(buffer, "TER", 3)){
+	atom = parseAtom(buffer, resName, resSeq, chaintID);
+	if (!atom) continue;
+	if (seq != resSeq){
+	  if (aa) {
+	    //aa->print();
+	    _chaints[_numbChaints].setName(chaintID);
+	    _chaints[_numbChaints].add(seq - 1, aa);
+	  }
+	  seq = resSeq;
+	  aa = new AminoAcid(resName);
+	}
+	if (aa) aa->add(atom);
+	_file.next();
+	buffer = _file.getLine();
+      }
+      //aa->print();
+      _chaints[_numbChaints].add(seq - 1, aa);
+      _numbChaints++;
+    }
+    
+  }
+  
+  return 0;
+}
+
+pdb_atom* parseAtom(const char* line, char* resName, int& resSeq, char& chaintID){  
+  
+  pdb_atom* atom = (pdb_atom*)malloc(sizeof(pdb_atom));
+  
+  //atom_serial number  
+  atom->serial = (unsigned)atoi(line + 6); 
+  
+  //atom name
+  int j = 0;
+  for (int i = 12; i <= 15; i++){
+    if (line[i] != ' ' && line[i] != '\t'){
+      atom->name[j++] = line[i];
+    } 
+  }
+
+  atom->name[j] = 0;
+  
+  //alternative locations are discarded
+  if (!j || (line[16] != ' ' && line[16] != 'A')) {
+    free(atom);
+    return NULL;
+  }
+  
+  //x, y, z, temp
+  //x, y, z, temp and occupancy
+  char num[9];
+  num[8] = 0;
+  memcpy(num, line + 30, 8);
+  atom->x = (float)atof(num);
+  
+  memcpy(num, line + 38, 8);
+  atom->y = (float)atof(num);
+
+  memcpy(num, line + 46, 8);
+  atom->z = (float)atof(num);
+  
+  memcpy(num, line + 60, 8);
+  atom->temp = (float)atof(num);
+
+  //residue name
+  memcpy(resName, line + 17, 3);  
+  
+  //chaint ID
+  chaintID = line[21];
+  //residue sequence number
+  resSeq = (unsigned)atoi(line + 22);
+  return atom;
+  
+} 
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+#include <ctype.h>
+
+#include <jpeglib.h>
+#include <jconfig.h>
+#include <png.h>
+#include "imageio.h"
+
+#define TRANSFORM PNG_TRANSFORM_STRIP_16 | PNG_TRANSFORM_EXPAND \
+| PNG_TRANSFORM_PACKING
+
+#define TRANSFORM_NA PNG_TRANSFORM_STRIP_16 | PNG_TRANSFORM_EXPAND \
+| PNG_TRANSFORM_PACKING | PNG_TRANSFORM_STRIP_ALPHA
+
+
+/**
+ * open png file, read file into RGBA char*
+ */
+unsigned char* open_png(char* filename, int &w, int &h, int &ch, int hasAlpha){
+  png_structp png_ptr;
+  png_infop info_ptr;
+  unsigned int sig_read = 0;
+  png_uint_32 width, height;
+  //int bit_depth, color_type, interlace_type;
+  FILE *fp;
+  
+  if ((fp = fopen(filename, "rb")) == NULL){
+    return NULL;
+  }
+  
+  /* Create and initialize the png_struct with the desired error handler
+   * functions.  If you want to use the default stderr and longjump method,
+   * you can supply NULL for the last three parameters.  We also supply the
+   * the compiler header file version, so that we know if the application
+   * was compiled with a compatible version of the library.  REQUIRED
+   */
+  png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING,
+      NULL, NULL, NULL);
+  
+  if (png_ptr == NULL){
+    fclose(fp);
+    return NULL;
+  }
+  
+  /* Allocate/initialize the memory for image information.  REQUIRED. */
+  info_ptr = png_create_info_struct(png_ptr);
+  if (info_ptr == NULL){
+    fclose(fp);
+    png_destroy_read_struct(&png_ptr, png_infopp_NULL, png_infopp_NULL);
+    return NULL;
+  }
+
+  /* Set up the input control if you are using standard C streams */
+  png_init_io(png_ptr, fp);
+  if (hasAlpha)
+    png_read_png(png_ptr, info_ptr, TRANSFORM, png_voidp_NULL);
+  else
+    png_read_png(png_ptr, info_ptr, TRANSFORM_NA, png_voidp_NULL);
+  /* At this point you have read the entire image */
+  png_byte** img = png_get_rows(png_ptr, info_ptr);
+  
+  w = png_get_image_width(png_ptr, info_ptr);
+  h = png_get_image_height(png_ptr, info_ptr);
+  ch = png_get_channels(png_ptr, info_ptr);
+  
+  unsigned char* buffer = (unsigned char*)malloc(w * h * ch);
+  for (int i = 0; i < h; i++){
+    memcpy(&buffer[i * w * ch], img[i], w * ch);
+    delete [] img[i];
+    img[i] = NULL;
+  }
+  
+  /* clean up after the read, and free any memory allocated - REQUIRED */
+  png_destroy_read_struct(&png_ptr, &info_ptr, png_infopp_NULL);
+  
+  fclose(fp);
+  return buffer;
+}
+
+/** write RGBA char* to file
+ *  return 0 upon success
+ */
+
+int write_png(char *file_name, unsigned char* buffer, int width, int height, int hasAlpha){
+   FILE *fp;
+   png_structp png_ptr;
+   png_infop info_ptr;
+   png_colorp palette;
+
+   /* open the file */
+   fp = fopen(file_name, "wb");
+   if (fp == NULL)
+     return -1;
+
+   //allocate struct
+   png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+
+   if (png_ptr == NULL){
+      fclose(fp);
+      return -1;
+   }
+
+   /* Allocate/initialize the image information data.  REQUIRED */
+   info_ptr = png_create_info_struct(png_ptr);
+   if (info_ptr == NULL){
+     fclose(fp);
+     png_destroy_write_struct(&png_ptr,  png_infopp_NULL);
+     return -1;
+   }
+
+   /* set up the output control if you are using standard C streams */
+   png_init_io(png_ptr, fp);
+   
+   png_set_IHDR(png_ptr, info_ptr, width, height, 8, (hasAlpha) ? PNG_COLOR_TYPE_RGBA : PNG_COLOR_TYPE_RGB,
+		PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_BASE, PNG_FILTER_TYPE_BASE);
+   
+   png_set_gAMA(png_ptr, info_ptr, GAMA);
+   
+   /* otherwise, if we are dealing with a color image then */
+   
+   png_color_8 sig_bit;
+   sig_bit.red = 8;
+   sig_bit.green = 8;
+   sig_bit.blue = 8;
+   sig_bit.alpha = hasAlpha ? 8 : 0;
+   
+   png_set_sBIT(png_ptr, info_ptr, &sig_bit);
+   
+   png_text_struct text_ptr[1]; 
+   text_ptr[0].key = "Author";
+   text_ptr[0].text = "Clearsky";
+   text_ptr[0].compression = PNG_TEXT_COMPRESSION_NONE;
+   png_set_text(png_ptr, info_ptr, text_ptr, 1);
+
+   /* ... set palette colors ... */
+   palette = (png_colorp)png_malloc(png_ptr, PNG_MAX_PALETTE_LENGTH
+             * sizeof (png_color));
+
+   png_set_PLTE(png_ptr, info_ptr, palette, PNG_MAX_PALETTE_LENGTH);
+
+   /* Write the file header information.  REQUIRED */
+   png_write_info(png_ptr, info_ptr);
+
+   int d = hasAlpha ? 4 : 3;
+   png_byte** row_pointers =
+     (png_byte**)malloc(width * height * d);
+   for (int k = 0; k < height; k++)
+     row_pointers[k] = (png_byte*)buffer + k*width*d;
+   
+   png_write_image(png_ptr, row_pointers);
+
+   /* It is REQUIRED to call this to finish writing the rest of the file */
+   png_write_end(png_ptr, info_ptr);
+   
+   png_destroy_write_struct(&png_ptr, &info_ptr);
+
+   /* close the file */
+   fclose(fp);
+   delete [] row_pointers;
+   delete [] palette;
+   /* that's it */
+   return 0;
+}
+
+unsigned char* decompress(char* file_name, int &w, int &h, int& d){
+    
+  FILE				*fp;		// File pointer
+  struct jpeg_decompress_struct	cinfo;		// Decompressor info
+  struct jpeg_error_mgr		jerr;		// Error handler info
+  JSAMPROW			row;		// Sample row pointer
+  unsigned char* array;
+  
+  if ((fp = fopen("img.jpeg", "rb")) == NULL) return 0;
+
+  cinfo.err = jpeg_std_error(&jerr);
+  jerr.error_exit = 0; //jpeg_error_handler;
+
+  jpeg_create_decompress(&cinfo);
+  jpeg_stdio_src(&cinfo, fp);
+  jpeg_read_header(&cinfo, 1);
+
+  cinfo.quantize_colors      = (boolean)FALSE;
+  cinfo.out_color_space      = JCS_RGB;
+  cinfo.out_color_components = 3;
+  cinfo.output_components    = 3;
+
+  jpeg_calc_output_dimensions(&cinfo);
+
+  w = cinfo.output_width;
+  h = cinfo.output_height;
+  d = cinfo.output_components;
+
+  array = (unsigned char*)malloc(w * h * d);
+
+  jpeg_start_decompress(&cinfo);
+
+  while (cinfo.output_scanline < cinfo.output_height)
+  {
+    row = (JSAMPROW)(array +
+                     cinfo.output_scanline * cinfo.output_width *
+                     cinfo.output_components);
+    jpeg_read_scanlines(&cinfo, &row, (JDIMENSION)1);
+  }
+
+  jpeg_finish_decompress(&cinfo);
+  jpeg_destroy_decompress(&cinfo);
+
+  fclose(fp);
+ 
+  return array;
+}
+
+void compress(unsigned char* array, char* file_name, int w, int h, int d, int quality){
+  struct jpeg_compress_struct cinfo;
+  struct jpeg_error_mgr jerr;
+  
+  cinfo.err = jpeg_std_error(&jerr);
+  jpeg_create_compress(&cinfo);
+ 
+  FILE * outfile;
+
+  if ((outfile = fopen(file_name, "wb")) == NULL) {
+    fprintf(stderr, "can't open file to write\n" );
+    exit(1);
+  }
+  jpeg_stdio_dest(&cinfo, outfile);
+  cinfo.image_width = w;
+  cinfo.image_height = h;
+  cinfo.input_components = d;
+  cinfo.in_color_space = JCS_RGB;
+  
+  jpeg_set_defaults(&cinfo);
+  jpeg_set_quality(&cinfo, quality, TRUE); /** 0-100 */
+
+  jpeg_start_compress(&cinfo, TRUE);
+  
+  JSAMPROW row_pointer[1];
+  int row_stride = w * d;
+  while (cinfo.next_scanline < cinfo.image_height){
+    row_pointer[0] = &array[cinfo.next_scanline * row_stride];
+    jpeg_write_scanlines(&cinfo, row_pointer, 1);
+  }
+  
+  jpeg_finish_compress(&cinfo);
+  jpeg_destroy_compress(&cinfo);
+  fclose(outfile);
+}
